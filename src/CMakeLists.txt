@@ -3,6 +3,15 @@ cmake_minimum_required(VERSION 3.9)
 set(XLANG_SCRIPTS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
 set(XLANG_LIBRARY_PATH "${CMAKE_CURRENT_SOURCE_DIR}/library")
 
+find_program(CLANG_TIDY NAMES clang-tidy)
+function(XLANG_TARGET_GUIDELINE_CHECKS target)
+    if(CLANG_TIDY)
+        set_property(
+            TARGET ${target}
+            PROPERTY CXX_CLANG_TIDY ${CLANG_TIDY} "-checks=cppcoreguidelines-*")
+    endif()
+endfunction(XLANG_TARGET_GUIDELINE_CHECKS)
+
 function(TARGET_CONFIG_MSVC_PCH target pch_cpp pch_header)
 
     set(pch_output_file "\"${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pch\"")

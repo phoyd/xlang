@@ -15,6 +15,7 @@ endif()
 
 add_definitions(-DXLANG_PAL_EXPORTS)
 add_library(pal SHARED ${sources})
+xlang_target_guideline_checks(pal)
 target_include_directories(pal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(pal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/published)
 
