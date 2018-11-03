@@ -7,6 +7,9 @@ namespace xlang::impl
     //
     // A simple, flexible, self contained and stateless UTF8<->UTF16 converter.
     //
+    // Note:
+    // CCG=C++ Core Guidelines (https://github.com/isocpp/CppCoreGuidelines)
+
     template <class Traits> class simple_unicode_converter
     {
 
@@ -16,18 +19,12 @@ namespace xlang::impl
         [[noreturn]] static void invalid() { Traits::data_error(); }
         [[noreturn]] static void buffer_error() { Traits::buffer_error(); }
 
-        // Make narrowing explicit. The code in this class does not do any narrowing that
-        // would fail within its assumptions. So we assume that a failed narrowing is
-        // an unhandled boundary condtion from malformed data.
+        // Make narrowing explicit [CCG]
+        // must be correct at call size
         template<class R, class A>
         static constexpr R narrow_cast(const A &a)
         {
-            R r=static_cast<R>(a);
-            if (a != static_cast<A>(r))
-            {
-                invalid();
-            }
-            return r;
+            return static_cast<R>(a);
         }
 
       public:
@@ -56,11 +53,21 @@ namespace xlang::impl
         //
         // Actually, this routines does not know anything about the kind of data
         // processed.
+
+        // encodings with a common ASCII Plane could simply fast forward
+        // conversion here. Specialize for EBCDIC.
+        template<class SrcFilter, class DestFilter>
+        static bool constexpr is_passthrough(typename SrcFilter::cvt v)
+        {
+            return v<=0x7fu; // ASCII plane
+        }
+
         template <class In, class Out, class SrcFilter, class DestFilter>
         static size_t convert(In in_start, In in_end, Out out_start,
                               Out out_end, SrcFilter&& src_filter,
                               DestFilter&& dst_filter, bool count_only)
         {
+
             // the reader closure reads from the input iterator
             auto reader = [&in_start, &in_end]() {
                 if (in_start < in_end)
@@ -94,8 +101,15 @@ namespace xlang::impl
 
             while (in_start < in_end)
             {
-                auto cp = src_filter.read(reader);
-                dst_filter.write(cp, writer);
+                if (is_passthrough<SrcFilter,DestFilter>(*in_start))
+                {
+                    writer(*in_start++);
+                }
+                else
+                {
+                    auto cp = src_filter.read(reader);
+                    dst_filter.write_unchecked(cp, writer);
+                }
             }
             return written;
         }
@@ -120,6 +134,25 @@ namespace xlang::impl
             }
         }
 
+        class utf32_filter
+        {
+        public:
+            typedef uint32_t cvt; // code value type
+            template <class In> static uint32_t read(In &&in)
+            {
+                return if_valid(in());
+            }
+            template <class Out> static int write(uint32_t c, Out &&out)
+            {
+                return write_unchecked(if_valid(c),out);
+            }
+            template <class Out> static int write_unchecked(uint32_t c, Out &&out)
+            {
+              out(if_valid(c));
+              return 1;
+            }
+        };
+
         class utf16_filter
         {
           private:
@@ -133,6 +166,7 @@ namespace xlang::impl
             }
 
           public:
+            typedef uint16_t cvt; // code value type
             // read up to two UTF-16 code units from 'in' and try to make
             // a valid codepoint from it.
             template <class In> static uint32_t read(In&& in)
@@ -155,8 +189,11 @@ namespace xlang::impl
             // is the native byte order.
             template <class Out> static int write(uint32_t c, Out&& out)
             {
-                if_valid(c);
+                return write_unchecked(if_valid(c),out);
+            }
 
+            template <class Out> static int write_unchecked(uint32_t c, Out&& out)
+            {
                 if (c < 0x10000)
                 {
                     out(c);
@@ -190,8 +227,8 @@ namespace xlang::impl
             template <uint8_t Mark, unsigned Start, unsigned Count>
             static constexpr uint8_t fetch(uint32_t cp)
             {
-                static_assert(Count<8);
-                static_assert(Count+Start<32);
+                static_assert(Count<8,"invalid bitcount");
+                static_assert(Count+Start<32,"invalid bitstart");
                 // this can't overflow
                 return (Mark | ((cp >> Start) & ((1u << Count) - 1)));
             }
@@ -202,8 +239,8 @@ namespace xlang::impl
             template <uint8_t Mark, unsigned Start, unsigned Count>
             static void store(uint32_t &cp, uint8_t b)
             {
-                static_assert(Count<8);
-                static_assert(Count+Start<32);
+                static_assert(Count<8,"invalid bitcount");
+                static_assert(Count+Start<32,"invalid bitstart");
                 auto mask = ((1u << Count) - 1);
                 if ((b & ~mask) == Mark)
                 {
@@ -216,6 +253,7 @@ namespace xlang::impl
             }
 
           public:
+            typedef uint8_t cvt; // code value type
             // Read up to 4 input bytes as UTF-8 and produce a UTF-32 codepoint
             // in native byte order.
             template <class In> static uint32_t read(In&& in)
@@ -223,7 +261,7 @@ namespace xlang::impl
                 uint8_t b = in();
                 if (b <= 0x7f) // 0x00..0x7f
                 {
-                    return if_valid(b);
+                    return b; // always valid
                 }
                 else if (b <= 0xdf) // 0x80..0x7ff
                 {
@@ -234,7 +272,7 @@ namespace xlang::impl
                     {
                         invalid(); // overlong encoding
                     }
-                    return if_valid(cp);
+                    return cp; // this are is always valid
                 }
                 else if (b <= 0xef) // 0x800..0xffff
                 {
@@ -246,7 +284,7 @@ namespace xlang::impl
                     {
                         invalid(); // overlong encoding
                     }
-                    return if_valid(cp);
+                    return if_valid(cp); // could be surrogate cp
                 }
                 else if (b <= 0xf7) // 0x10000-0x10ffff
                 {
@@ -271,8 +309,10 @@ namespace xlang::impl
             // write them to 'out' callable.
             template <class Out> static int write(uint32_t cp, Out&& out)
             {
-                if_valid(cp);
-
+                return write(if_valid(cp),out);
+            }
+            template <class Out> static int write_unchecked(uint32_t cp, Out&& out)
+            {
                 if (cp <= 0x7f)
                 {
                     out(narrow_cast<uint8_t>(cp));
