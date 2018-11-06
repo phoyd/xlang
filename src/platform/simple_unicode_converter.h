@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -12,6 +13,7 @@ namespace xlang::impl::code_converter
 //
 // Note:
 // CCG=C++ Core Guidelines (https://github.com/isocpp/CppCoreGuidelines)
+// GSL=CCG support library (https://github.com/Microsoft/GSL/)
 
 #ifndef GSL_LIKELY
 #if defined(__clang__) || defined(__GNUC__)
@@ -21,6 +23,39 @@ namespace xlang::impl::code_converter
 #define GSL_LIKELY(x) (!!(x))
 #define GSL_UNLIKELY(x) (!!(x))
 #endif
+#endif
+
+// copied from gsl/gsl_assert:
+//
+// GSL_ASSUME(cond)
+//
+// Tell the optimizer that the predicate cond must hold. It is unspecified
+// whether or not cond is actually evaluated.
+//
+#ifdef _MSC_VER
+#define GSL_ASSUME(cond) __assume(cond)
+#elif defined(__clang__) || defined(__GNUC__)
+#define GSL_ASSUME(cond) ((cond) ? static_cast<void>(0) : __builtin_unreachable())
+#else
+#define GSL_ASSUME(cond) static_cast<void>((cond) ? 0 : 0)
+#endif
+//
+// GSL_ASSUME() is not a compiler hint. Instead it kills all code paths where the assumption would
+// not hold, making the code undefined if the assumption were wrong. We turn ASSUME in to ASSERT for
+// Debug build to check our assumptions at runtime.
+//
+#ifdef _DEBUG
+#define XLANG_ASSUME(cond) assert(cond)
+#else
+#define XLANG_ASSUME(cond) GSL_ASSUME(cond)
+#endif
+
+#ifdef _MSC_VER
+#define XLANG_FORCE_INLINE __forceinline
+#elif defined(__clang__) || defined(__GNUC__)
+#define XLANG_FORCE_INLINE __attribute__((always_inline))
+#else
+XLANG_FORCE_INLINE
 #endif
 
 //
@@ -44,7 +79,7 @@ enum class converter_result
 // must be correct at call size
 //
 template <class R, class A>
-static constexpr R narrow_cast(const A& a)
+constexpr R narrow_cast(const A& a)
 {
     return static_cast<R>(a);
 }
@@ -54,7 +89,7 @@ static constexpr R narrow_cast(const A& a)
 // without conversion. Specialize for EBCDIC, UTF-16
 //
 template <class SrcFilter, class DestFilter>
-static bool constexpr is_passthrough(typename SrcFilter::cvt v)
+bool constexpr is_passthrough(typename SrcFilter::cvt v)
 {
     return v <= 0x7f; // ASCII plane
 }
@@ -62,28 +97,31 @@ static bool constexpr is_passthrough(typename SrcFilter::cvt v)
 //
 // Codepoints in the surrogate area or after U++10FFFF are invalid.
 //
-static constexpr bool is_invalid_cp(uint32_t u)
+// constexpr bool is_invalid_cp(uint32_t u)
+//{
+//    return ((u >= 0xd800) && (u <= 0xdfff)) || (u > 0x10ffff);
+//}
+constexpr bool is_valid_cp(uint32_t u)
 {
-    return ((u >= 0xd800) && (u <= 0xdfff)) || (u > 0x10ffff);
+    return (u <= 0xd7ff) || ((u > 0xdfff) && (u <= 0x10ffff));
 }
 //
 // They can only be used in the UTF16 encoding, to mark a "surrogate pair",
 // an encoding to map code points above 0x10000 into UTF16.
 //
-static constexpr bool is_high_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdbff)); }
-static constexpr bool is_low_surrogate(uint32_t u) { return ((u >= 0xdc00) && (u <= 0xdfff)); }
+constexpr bool is_high_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdbff)); }
+constexpr bool is_low_surrogate(uint32_t u) { return ((u >= 0xdc00) && (u <= 0xdfff)); }
 
 //
 // return codepoint, but only if it is valid, otherwise assume malformed data
 // and rise exception
 //
-static constexpr uint32_t if_valid(uint32_t u)
+constexpr uint32_t if_valid(uint32_t u)
 {
-    if (is_invalid_cp(u)) { invalid(); }
-    else
-    {
+    if (is_valid_cp(u))
         return u;
-    }
+    else
+        invalid();
 }
 
 //
@@ -102,22 +140,23 @@ public:
     // Read as single code point from input 'in'. 'b' is a lookahead,
     // so we don't need to read anything.
     template <class In>
-    static uint32_t read(uint32_t b, In&& in)
+    static uint32_t XLANG_FORCE_INLINE read(uint32_t b, In&&)
     {
         return if_valid(b);
     }
     // Convert 'c' to the output format and write it to 'out'
     // Returns the number of cove values that have been written
     template <class Out>
-    static int write(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write(uint32_t c, Out&& out)
     {
         return write_valid(if_valid(c), out);
     }
     // Same as above, except that it does not check if 'c' is a
     // valid code point (for example, because it has been checked before)
     template <class Out>
-    static int write_valid(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(uint32_t c, Out&& out)
     {
+        XLANG_ASSUME(is_valid_cp(c));
         out(c);
         return 1;
     }
@@ -137,7 +176,7 @@ public:
     // read up to 'max_cv_len' UTF-16 code values from 'h' and 'in' and try to make
     // a valid codepoint from it.
     template <class In>
-    static uint32_t read(uint16_t h, In&& in)
+    static uint32_t XLANG_FORCE_INLINE read(uint16_t h, In&& in)
     {
         if (is_high_surrogate(h))
         {
@@ -152,14 +191,15 @@ public:
     // write up to two UTF-16 code values to 'out'. The output byte order
     // is the native byte order.
     template <class Out>
-    static int write(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write(uint32_t c, Out&& out)
     {
         return write_valid(if_valid(c), out);
     }
 
     template <class Out>
-    static int write_valid(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(uint32_t c, Out&& out)
     {
+        XLANG_ASSUME(is_valid_cp(c));
         if (c < 0x10000)
         {
             out(c);
@@ -167,6 +207,7 @@ public:
         }
         else
         {
+            XLANG_ASSUME(c <= 0x10ffff); // because of is_valid_cp();
             c -= 0x10000;
             uint16_t h = narrow_cast<uint16_t>(0xd800 + (c >> 10));
             if (!is_high_surrogate(h)) { invalid(); }
@@ -209,7 +250,7 @@ private:
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
-        auto mask = ((1 << Count) - 1);
+        auto mask = ((1u << Count) - 1u);
         cp |= (b & mask) << Start;
         return ((b & ~mask) ^ Mark); // return zero if valid
         // return ((b & ~mask) == Mark);
@@ -232,7 +273,7 @@ public:
     // 6   31  04000000 7FFFFFFF 1111110v 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv
     //
     template <class In>
-    static uint32_t read(uint8_t b, In&& in)
+    static uint32_t XLANG_FORCE_INLINE read(uint8_t b, In&& in)
     {
         // ATTENTION:
         // * no returns are falling through 'invalid' at the end.
@@ -240,6 +281,11 @@ public:
         {
             return b; // always valid
         }
+        // We could add checks for invalid values of b here, like this one
+        // after 'if (b<=0x7f)':
+        //  else if (b<=0xbf) invalid();
+        // buf this adds an extra branch - better check
+        // the bit pattern for b later with 'store_ck' (branchless).
         else if (b <= 0xdf) // 0x80..0x7ff
         {
             uint32_t cp = 0;
@@ -247,20 +293,21 @@ public:
             // see "Byte Sequence in Binary"
             auto fail = (store_ck<0xc0, 6, 5>(cp, b) | store_ck<0x80, 0, 6>(cp, b1));
             // this sequence must return a code point from
-            // the range above. Smalle code points are an overlong encoding
+            // the range above. Smaller code points are an overlong encoding
             // error.
-            if (!fail && (cp >= 0x80)) return cp;
+            // if (!fail && (cp >= 0x80)) return cp;
+            if (!(fail | (cp<0x80)) return cp;
         }
         else if (b <= 0xef) // 0x800..0xffff
         {
             uint32_t cp = 0;
             uint8_t b1 = in();
             uint8_t b2 = in();
-
-            auto fail = (store_ck<0xe0, 12, 4>(cp, b) | store_ck<0x80, 6, 6>(cp, b1) ||
+            // attn: undefine order of evaulation with |
+            auto fail = (store_ck<0xe0, 12, 4>(cp, b) | store_ck<0x80, 6, 6>(cp, b1) |
                          store_ck<0x80, 0, 6>(cp, b2));
             // check if cp is in the surrogate area
-            if (!fail && (cp >= 0x800) && !is_invalid_cp(cp)) return cp;
+            if (!(fail | (cp < 0x800) | !is_valid_cp(cp))) return cp;
         }
         else if (b <= 0xf7) // 0x10000-0x10ffff
         {
@@ -270,7 +317,7 @@ public:
             uint8_t b3 = in();
             auto fail = (store_ck<0xf0, 18, 3>(cp, b) | store_ck<0x80, 12, 6>(cp, b1) |
                          store_ck<0x80, 6, 6>(cp, b2) | store_ck<0x80, 0, 6>(cp, b3));
-            if (!fail && (cp >= 0x10000) && (cp <= 0x10ffff)) return cp;
+            if (!(fail | (cp < 0x10000) | (cp > 0x10ffff))) return cp;
         }
         invalid();
     }
@@ -278,14 +325,15 @@ public:
     // Convert a UTF-32 codepoint into up to 4 UTF-8 code units and
     // write them to 'out'.
     template <class Out>
-    static int write(uint32_t cp, Out&& out)
+    static int XLANG_FORCE_INLINE write(uint32_t cp, Out&& out)
     {
         return write_valid(if_valid(cp), out);
     }
-    // for the magic numbers see 'read'
+
     template <class Out>
-    static int write_valid(uint32_t cp, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(uint32_t cp, Out&& out)
     {
+        XLANG_ASSUME(is_valid_cp(cp));
         if (cp <= 0x7f)
         {
             out(narrow_cast<uint8_t>(cp));
@@ -315,6 +363,45 @@ public:
         else
         {
             invalid();
+        }
+    }
+};
+
+// Specializations for utf16
+template <>
+bool constexpr is_passthrough<utf16_filter, utf32_filter>(utf16_filter::cvt v)
+{
+    return v < 0xd800; // pre surrogate is safe
+}
+template <>
+bool constexpr is_passthrough<utf32_filter, utf16_filter>(utf32_filter::cvt v)
+{
+    return v < 0xd800; // pre surrogate is safe
+}
+
+//
+// We can use SrcFilter and DestFilter as they are or join them in
+// a 'transformer' which can be specialized on its type parameters, for
+// example to implement an optimized conversion pair.
+//
+template <class SrcFilter, class DestFilter>
+struct transformer
+{
+    SrcFilter&& src;
+    DestFilter&& dst;
+
+    template <class R, class W>
+    size_t XLANG_FORCE_INLINE tranform_one(typename SrcFilter::cvt b, R&& reader, W&& writer)
+    {
+        if (is_passthrough<SrcFilter, DestFilter>(b))
+        {
+            writer(b);
+            return 1;
+        }
+        else
+        {
+            auto cp = src.read(b, reader);
+            return dst.write_valid(cp, writer);
         }
     }
 };
@@ -356,7 +443,7 @@ class output_size_counter_spec;
 
 // forward to a specialization on the iterator types.
 template <class In, class Out, class SrcFilter, class DestFilter>
-static converter_result convert(In in_start, In in_end, Out out_start, Out out_end,
+inline converter_result convert(In in_start, In in_end, Out out_start, Out out_end,
                                 SrcFilter&& src_filter, DestFilter&& dst_filter,
                                 size_t& result_size)
 {
@@ -375,7 +462,7 @@ static converter_result convert(In in_start, In in_end, Out out_start, Out out_e
 }
 // forward to a specialization on the iterator types.
 template <class In, class SrcFilter, class DestFilter>
-static converter_result output_size(In in_start, In in_end, SrcFilter&& src_filter,
+inline converter_result output_size(In in_start, In in_end, SrcFilter&& src_filter,
                                     DestFilter&& dst_filter, size_t& result_size)
 {
     try
@@ -392,11 +479,12 @@ static converter_result output_size(In in_start, In in_end, SrcFilter&& src_filt
     }
 }
 
+
 //
 //          Specialized Converter
 //
 //
-// This is the default template and the general case
+// This is the default template and the general case.
 // In and Out can move forward, compare for *(in-)equality* only,
 // Out is mutable
 //
@@ -408,7 +496,9 @@ public:
     static size_t convert(In in_start, In in_end, Out out_start, Out out_end,
                           SrcFilter&& src_filter, DestFilter&& dst_filter)
     {
-        // the reader closure reads from the input iterator
+        transformer<SrcFilter, DestFilter> trans{std::forward<SrcFilter>(src_filter),
+                                                 std::forward<DestFilter>(dst_filter)};
+
         auto reader_checked = [&in_start, in_end]() {
             if (GSL_LIKELY(in_start != in_end)) { return *in_start++; }
             else
@@ -428,23 +518,10 @@ public:
         size_t write_count = 0;
 
         while (in_start != in_end)
-        {
-            auto b = reader_unchecked();
-            if (is_passthrough<SrcFilter, DestFilter>(b))
-            {
-                writer_checked(b);
-                write_count++;
-            }
-            else
-            {
-                auto cp = src_filter.read(b, reader_checked);
-                write_count += dst_filter.write_valid(cp, writer_checked);
-            }
-        }
+        { write_count += trans.tranform_one(reader_unchecked(), reader_checked, writer_checked); }
         return write_count;
     }
 };
-
 //
 // Specialization: In and Out are random access iterators.
 //
@@ -452,11 +529,14 @@ template <class In, class Out, class SrcFilter, class DestFilter>
 class converter_spec<In, Out, SrcFilter, DestFilter, std::random_access_iterator_tag,
                      std::random_access_iterator_tag>
 {
-
 public:
     static size_t convert(In in_start, In in_end, Out out_start, Out out_end,
                           SrcFilter&& src_filter, DestFilter&& dst_filter)
     {
+        transformer<SrcFilter, DestFilter> trans{std::forward<SrcFilter>(src_filter),
+                                                 std::forward<DestFilter>(dst_filter)};
+
+        auto out_start_org = out_start; // (out-start-out_start_org) => number of values written
         // the reader closure reads from the input iterator
         auto reader_checked = [&in_start, in_end]() {
             if (GSL_LIKELY(in_start != in_end)) { return *in_start++; }
@@ -475,25 +555,7 @@ public:
             }
         };
         auto writer_unchecked = [&out_start](auto item) { *out_start++ = item; };
-        size_t write_count = 0;
 
-#define XLANG_CONVERT_ONE(R, W)                                                                    \
-    do                                                                                             \
-    {                                                                                              \
-        auto b = reader_unchecked(); /* always safe */                                             \
-        if (is_passthrough<SrcFilter, DestFilter>(b))                                              \
-        {                                                                                          \
-            W(b);                                                                                  \
-            write_count++;                                                                         \
-        }                                                                                          \
-        else                                                                                       \
-        {                                                                                          \
-            auto cp = src_filter.read(b, R);                                                       \
-            write_count += dst_filter.write_valid(cp, W);                                          \
-        }                                                                                          \
-    } while (0)
-
-        //
         while (in_start != in_end)
         {
             auto in_len = in_end - in_start;
@@ -503,35 +565,20 @@ public:
                 std::min(in_len / SrcFilter::max_cv_len, out_len / DestFilter::max_cv_len);
             auto batchlen = safelen / 4;
             if (batchlen == 0) break;
-            int i = 0;
-
-            for (int i = 0; i < batchlen; i++)
+            for (size_t i = 0; i < batchlen; i++)
             {
-                XLANG_CONVERT_ONE(reader_unchecked, writer_unchecked);
-                XLANG_CONVERT_ONE(reader_unchecked, writer_unchecked);
-                XLANG_CONVERT_ONE(reader_unchecked, writer_unchecked);
-                XLANG_CONVERT_ONE(reader_unchecked, writer_unchecked);
+                trans.tranform_one(reader_unchecked(), reader_unchecked, writer_unchecked);
+                trans.tranform_one(reader_unchecked(), reader_unchecked, writer_unchecked);
+                trans.tranform_one(reader_unchecked(), reader_unchecked, writer_unchecked);
+                trans.tranform_one(reader_unchecked(), reader_unchecked, writer_unchecked);
             }
         }
 
         while (in_start != in_end)
-        {
-            auto b = reader_unchecked();
-            if (is_passthrough<SrcFilter, DestFilter>(b))
-            {
-                writer_checked(b);
-                write_count++;
-            }
-            else
-            {
-                auto cp = src_filter.read(b, reader_checked);
-                write_count += dst_filter.write_valid(cp, writer_checked);
-            }
-        }
-        return write_count;
+        { trans.tranform_one(reader_unchecked(), reader_checked, writer_checked); }
+        return out_start - out_start_org;
     }
 };
-
 //
 // This is the default template and the general case the
 // output_size calculator.
