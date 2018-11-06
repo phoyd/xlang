@@ -236,8 +236,8 @@ private:
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
-        auto mask = ((1u << Count) - 1u);
-        auto val=((cp >> Start) & ((1u << Count) - 1));
+        constexpr auto mask = (1u << Count) - 1u;
+        auto val=(cp >> Start) & mask;
         return (Mark | val);
     }
     // This writes 'Count' bits from 'b' to 'cp' starting at 'Start'
@@ -249,7 +249,7 @@ private:
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
-        auto mask = ((1u << Count) - 1u);
+        constexpr auto mask = ((1u << Count) - 1u);
         cp |= (b & mask) << Start;
         return ((b & ~mask) ^ Mark); // return zero if valid
     }
