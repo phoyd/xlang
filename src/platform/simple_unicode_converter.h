@@ -85,16 +85,6 @@ constexpr R narrow_cast(const A& a)
 }
 
 //
-// encodings with a common ASCII Plane might copy code values
-// without conversion. Specialize for EBCDIC, UTF-16
-//
-template <class SrcFilter, class DestFilter>
-bool constexpr is_passthrough(typename SrcFilter::cvt v)
-{
-    return v <= 0x7f; // ASCII plane
-}
-
-//
 // Codepoints in the surrogate area or after U++10FFFF are invalid.
 //
 // constexpr bool is_invalid_cp(uint32_t u)
@@ -111,6 +101,7 @@ constexpr bool is_valid_cp(uint32_t u)
 //
 constexpr bool is_high_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdbff)); }
 constexpr bool is_low_surrogate(uint32_t u) { return ((u >= 0xdc00) && (u <= 0xdfff)); }
+constexpr bool is_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdfff)); }
 
 //
 // return codepoint, but only if it is valid, otherwise assume malformed data
@@ -197,6 +188,22 @@ public:
     }
 
     template <class Out>
+    static int XLANG_FORCE_INLINE write_valid_ext(uint32_t c, Out&& out)
+    {
+        c -= 0x10000;
+        XLANG_ASSUME(c <= 0xfffff); // because is_valid_cp(c);
+
+        // 0xfffff>>10 == 0x3ff, 0xd800+0x3ff == 0xdbff
+        // therefore h is a valid high surrogate.
+        uint16_t h = narrow_cast<uint16_t>(0xd800 + (c >> 10));
+        out(h);
+        // 0xdc00 + 0x3ff == 0xdfff
+        // therefore l is a valid low surrogate
+        uint16_t l = 0xdc00 + (c & 0x3ffu);
+        out(l);
+        return 2;
+    }
+    template <class Out>
     static int XLANG_FORCE_INLINE write_valid(uint32_t c, Out&& out)
     {
         XLANG_ASSUME(is_valid_cp(c));
@@ -207,15 +214,7 @@ public:
         }
         else
         {
-            XLANG_ASSUME(c <= 0x10ffff); // because of is_valid_cp();
-            c -= 0x10000;
-            uint16_t h = narrow_cast<uint16_t>(0xd800 + (c >> 10));
-            if (!is_high_surrogate(h)) { invalid(); }
-            uint16_t l = 0xdc00 + (c & 0x3ffu);
-            if (!is_low_surrogate(l)) { invalid(); }
-            out(h);
-            out(l);
-            return 2;
+            return write_valid_ext(c, std::forward<Out>(out));
         }
     }
 };
@@ -237,14 +236,14 @@ private:
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
-        // this can't overflow
-        return (Mark | ((cp >> Start) & ((1u << Count) - 1)));
+        auto mask = ((1u << Count) - 1u);
+        auto val=((cp >> Start) & ((1u << Count) - 1));
+        return (Mark | val);
     }
     // This writes 'Count' bits from 'b' to 'cp' starting at 'Start'
     // Returns a check value that is 0 if 'b' without the 'Count' bits
-    // is 'Mark' or some other value if not. This indicates failure
-    // and or'ing multiple results from storke_ck show if any of the
-    // results indicate failure.
+    // is 'Mark' or some other value if not.
+    // return false or non-zero for failure (Mark not found in b)
     template <unsigned Mark, unsigned Start, unsigned Count>
     static auto constexpr store_ck(uint32_t& cp, uint8_t b)
     {
@@ -253,9 +252,7 @@ private:
         auto mask = ((1u << Count) - 1u);
         cp |= (b & mask) << Start;
         return ((b & ~mask) ^ Mark); // return zero if valid
-        // return ((b & ~mask) == Mark);
     }
-
 public:
     // Read up to 4 input values as UTF-8 and produce a UTF-32 code point
     // in native byte order. NOTE: We are dealing with UTF-32 code points
@@ -276,48 +273,33 @@ public:
     static uint32_t XLANG_FORCE_INLINE read(uint8_t b, In&& in)
     {
         // ATTENTION:
-        // * no returns are falling through 'invalid' at the end.
+        // * no-returns are falling through 'invalid' at the end.
         if (b <= 0x7f) // 0x00..0x7f (Hex Min and Hex Max in the table above)
         {
             return b; // always valid
         }
-        // We could add checks for invalid values of b here, like this one
-        // after 'if (b<=0x7f)':
-        //  else if (b<=0xbf) invalid();
-        // buf this adds an extra branch - better check
-        // the bit pattern for b later with 'store_ck' (branchless).
         else if (b <= 0xdf) // 0x80..0x7ff
         {
             uint32_t cp = 0;
             uint8_t b1 = in();
-            // see "Byte Sequence in Binary"
-            auto fail = (store_ck<0xc0, 6, 5>(cp, b) | store_ck<0x80, 0, 6>(cp, b1));
-            // this sequence must return a code point from
-            // the range above. Smaller code points are an overlong encoding
-            // error.
-            // if (!fail && (cp >= 0x80)) return cp;
-            if (!(fail | (cp<0x80)) return cp;
+            auto fail = (store_ck<0xc0, 6, 5>(cp, b) || store_ck<0x80, 0, 6>(cp, b1));
+            if (!fail && (cp >= 0x80)) return cp;
         }
         else if (b <= 0xef) // 0x800..0xffff
         {
             uint32_t cp = 0;
             uint8_t b1 = in();
             uint8_t b2 = in();
-            // attn: undefine order of evaulation with |
-            auto fail = (store_ck<0xe0, 12, 4>(cp, b) | store_ck<0x80, 6, 6>(cp, b1) |
+            auto fail = (store_ck<0xe0, 12, 4>(cp, b) || store_ck<0x80, 6, 6>(cp, b1) ||
                          store_ck<0x80, 0, 6>(cp, b2));
-            // check if cp is in the surrogate area
-            if (!(fail | (cp < 0x800) | !is_valid_cp(cp))) return cp;
+            if (!fail && (cp >= 0x800) && is_valid_cp(cp)) return cp;
         }
         else if (b <= 0xf7) // 0x10000-0x10ffff
         {
             uint32_t cp = 0;
-            uint8_t b1 = in();
-            uint8_t b2 = in();
-            uint8_t b3 = in();
-            auto fail = (store_ck<0xf0, 18, 3>(cp, b) | store_ck<0x80, 12, 6>(cp, b1) |
-                         store_ck<0x80, 6, 6>(cp, b2) | store_ck<0x80, 0, 6>(cp, b3));
-            if (!(fail | (cp < 0x10000) | (cp > 0x10ffff))) return cp;
+            auto fail = (store_ck<0xf0, 18, 3>(cp, b) || store_ck<0x80, 12, 6>(cp, in()) ||
+                         store_ck<0x80, 6, 6>(cp, in()) || store_ck<0x80, 0, 6>(cp, in()));
+            if (!fail && (cp >= 0x10000) && (cp <= 0x10ffff)) return cp;
         }
         invalid();
     }
@@ -367,17 +349,35 @@ public:
     }
 };
 
-// Specializations for utf16
-template <>
-bool constexpr is_passthrough<utf16_filter, utf32_filter>(utf16_filter::cvt v)
+//
+// encodings with a common ASCII Plane might copy code values
+// without conversion. Specialize for EBCDIC, UTF-16
+//
+
+template<class S,class D>
+struct conv_pair
 {
-    return v < 0xd800; // pre surrogate is safe
-}
-template <>
-bool constexpr is_passthrough<utf32_filter, utf16_filter>(utf32_filter::cvt v)
+    static bool constexpr is_passthrough(typename S::cvt v)
+    {
+        return v <= 0x7f; // ASCII plane
+    }
+};
+template<>
+struct conv_pair<utf16_filter, utf32_filter>
 {
-    return v < 0xd800; // pre surrogate is safe
-}
+    static bool constexpr is_passthrough(typename utf16_filter::cvt v)
+    {
+        return (v <= 0xd7ff) || (v>=0xdfff); // ASCII plane
+    }
+};
+template<>
+struct conv_pair<utf32_filter, utf16_filter>
+{
+    static bool constexpr is_passthrough(typename utf32_filter::cvt v)
+    {
+        return (v <= 0xd7ff);
+    }
+};
 
 //
 // We can use SrcFilter and DestFilter as they are or join them in
@@ -393,7 +393,7 @@ struct transformer
     template <class R, class W>
     size_t XLANG_FORCE_INLINE tranform_one(typename SrcFilter::cvt b, R&& reader, W&& writer)
     {
-        if (is_passthrough<SrcFilter, DestFilter>(b))
+        if (conv_pair<SrcFilter,DestFilter>::is_passthrough(b))
         {
             writer(b);
             return 1;
@@ -405,7 +405,6 @@ struct transformer
         }
     }
 };
-
 // 'convert' tries to convert the *complete* range from 'in_start' to
 // 'in_end' and writes the result to the 'out_start' iterator, after
 // processing the data with 'src_filter' and 'dst_filter'.
@@ -580,7 +579,7 @@ public:
     }
 };
 //
-// This is the default template and the general case the
+// This is the general case for the
 // output_size calculator.
 // In can move forward, compare for *(in-)equality* only,
 template <class In, class SrcFilter, class DestFilter, class InCat>
