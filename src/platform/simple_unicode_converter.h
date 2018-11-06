@@ -15,6 +15,8 @@ namespace xlang::impl::code_converter
 // CCG=C++ Core Guidelines (https://github.com/isocpp/CppCoreGuidelines)
 // GSL=CCG support library (https://github.com/Microsoft/GSL/)
 
+using char8_t = uint8_t;
+
 #ifndef GSL_LIKELY
 #if defined(__clang__) || defined(__GNUC__)
 #define GSL_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -87,11 +89,11 @@ constexpr R narrow_cast(const A& a)
 //
 // Codepoints in the surrogate area or after U++10FFFF are invalid.
 //
-// constexpr bool is_invalid_cp(uint32_t u)
+// constexpr bool is_invalid_cp(char32_t u)
 //{
 //    return ((u >= 0xd800) && (u <= 0xdfff)) || (u > 0x10ffff);
 //}
-constexpr bool is_valid_cp(uint32_t u)
+constexpr bool is_valid_cp(char32_t u)
 {
     return (u <= 0xd7ff) || ((u > 0xdfff) && (u <= 0x10ffff));
 }
@@ -99,15 +101,15 @@ constexpr bool is_valid_cp(uint32_t u)
 // They can only be used in the UTF16 encoding, to mark a "surrogate pair",
 // an encoding to map code points above 0x10000 into UTF16.
 //
-constexpr bool is_high_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdbff)); }
-constexpr bool is_low_surrogate(uint32_t u) { return ((u >= 0xdc00) && (u <= 0xdfff)); }
-constexpr bool is_surrogate(uint32_t u) { return ((u >= 0xd800) && (u <= 0xdfff)); }
+constexpr bool is_high_surrogate(char32_t u) { return ((u >= 0xd800) && (u <= 0xdbff)); }
+constexpr bool is_low_surrogate(char32_t u) { return ((u >= 0xdc00) && (u <= 0xdfff)); }
+constexpr bool is_surrogate(char32_t u) { return ((u >= 0xd800) && (u <= 0xdfff)); }
 
 //
 // return codepoint, but only if it is valid, otherwise assume malformed data
 // and rise exception
 //
-constexpr uint32_t if_valid(uint32_t u)
+constexpr char32_t if_valid(char32_t u)
 {
     if (is_valid_cp(u))
         return u;
@@ -123,7 +125,7 @@ class utf32_filter
 {
 public:
     // The code value type this format is using.
-    typedef uint32_t cvt;
+    typedef char32_t cvt;
     // Maximum number of code values per code point. This can be used
     // for optimizations (like omitting buffer checks)
     static constexpr size_t max_cv_len = 1;
@@ -131,21 +133,21 @@ public:
     // Read as single code point from input 'in'. 'b' is a lookahead,
     // so we don't need to read anything.
     template <class In>
-    static uint32_t XLANG_FORCE_INLINE read(uint32_t b, In&&)
+    static char32_t XLANG_FORCE_INLINE read(char32_t b, In&&)
     {
         return if_valid(b);
     }
     // Convert 'c' to the output format and write it to 'out'
     // Returns the number of cove values that have been written
     template <class Out>
-    static int XLANG_FORCE_INLINE write(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write(char32_t c, Out&& out)
     {
         return write_valid(if_valid(c), out);
     }
     // Same as above, except that it does not check if 'c' is a
     // valid code point (for example, because it has been checked before)
     template <class Out>
-    static int XLANG_FORCE_INLINE write_valid(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(char32_t c, Out&& out)
     {
         XLANG_ASSUME(is_valid_cp(c));
         out(c);
@@ -161,50 +163,50 @@ class utf16_filter
 {
 private:
 public:
-    typedef uint16_t cvt;                   // code value type
+    typedef char16_t cvt;                   // code value type
     static constexpr size_t max_cv_len = 2; // a surrgate pair is 2 values long
 
     // read up to 'max_cv_len' UTF-16 code values from 'h' and 'in' and try to make
     // a valid codepoint from it.
     template <class In>
-    static uint32_t XLANG_FORCE_INLINE read(uint16_t h, In&& in)
+    static char32_t XLANG_FORCE_INLINE read(char16_t h, In&& in)
     {
         if (is_high_surrogate(h))
         {
-            uint16_t l = in();
+            char16_t l = in();
             if (!is_low_surrogate(l)) { invalid(); }
-            uint32_t cp = ((h - 0xd800u) << 10) + (l - 0xdc00u) + 0x10000u;
+            char32_t cp = ((h - 0xd800u) << 10) + (l - 0xdc00u) + 0x10000u;
             return if_valid(cp);
         }
-        return if_valid(h); // TODO: simplyfy check.
+        return if_valid(h);
     }
 
     // write up to two UTF-16 code values to 'out'. The output byte order
     // is the native byte order.
     template <class Out>
-    static int XLANG_FORCE_INLINE write(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write(char32_t c, Out&& out)
     {
         return write_valid(if_valid(c), out);
     }
 
     template <class Out>
-    static int XLANG_FORCE_INLINE write_valid_ext(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid_ext(char32_t c, Out&& out)
     {
         c -= 0x10000;
         XLANG_ASSUME(c <= 0xfffff); // because is_valid_cp(c);
 
         // 0xfffff>>10 == 0x3ff, 0xd800+0x3ff == 0xdbff
         // therefore h is a valid high surrogate.
-        uint16_t h = narrow_cast<uint16_t>(0xd800 + (c >> 10));
+        char16_t h = narrow_cast<char16_t>(0xd800 + (c >> 10));
         out(h);
         // 0xdc00 + 0x3ff == 0xdfff
         // therefore l is a valid low surrogate
-        uint16_t l = 0xdc00 + (c & 0x3ffu);
+        char16_t l = 0xdc00 + (c & 0x3ffu);
         out(l);
         return 2;
     }
     template <class Out>
-    static int XLANG_FORCE_INLINE write_valid(uint32_t c, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(char32_t c, Out&& out)
     {
         XLANG_ASSUME(is_valid_cp(c));
         if (c < 0x10000)
@@ -225,14 +227,14 @@ public:
 class utf8_filter
 {
 public:
-    typedef uint8_t cvt;
+    typedef char8_t cvt;
     static constexpr size_t max_cv_len = 4;
 
 private:
     // Helper function. Read 'Count' bits starting from 'Start' in cp
     // and put 'Mark' over the octet result.
-    template <uint8_t Mark, unsigned Start, unsigned Count>
-    static constexpr uint8_t fetch(uint32_t cp)
+    template <char8_t Mark, unsigned Start, unsigned Count>
+    static constexpr char8_t fetch(char32_t cp)
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
@@ -245,7 +247,7 @@ private:
     // is 'Mark' or some other value if not.
     // return false or non-zero for failure (Mark not found in b)
     template <unsigned Mark, unsigned Start, unsigned Count>
-    static auto constexpr store_ck(uint32_t& cp, uint8_t b)
+    static auto constexpr store_ck(char32_t& cp, char8_t b)
     {
         static_assert(Count < 8, "invalid bitcount");
         static_assert(Count + Start < 32, "invalid bitstart");
@@ -270,7 +272,7 @@ public:
     // 6   31  04000000 7FFFFFFF 1111110v 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv 10vvvvvv
     //
     template <class In>
-    static uint32_t XLANG_FORCE_INLINE read(uint8_t b, In&& in)
+    static char32_t XLANG_FORCE_INLINE read(char8_t b, In&& in)
     {
         // ATTENTION:
         // * no-returns are falling through 'invalid' at the end.
@@ -280,23 +282,23 @@ public:
         }
         else if (b <= 0xdf) // 0x80..0x7ff
         {
-            uint32_t cp = 0;
-            uint8_t b1 = in();
+            char32_t cp = 0;
+            char8_t b1 = in();
             auto fail = (store_ck<0xc0, 6, 5>(cp, b) || store_ck<0x80, 0, 6>(cp, b1));
             if (!fail && (cp >= 0x80)) return cp;
         }
         else if (b <= 0xef) // 0x800..0xffff
         {
-            uint32_t cp = 0;
-            uint8_t b1 = in();
-            uint8_t b2 = in();
+            char32_t cp = 0;
+            char8_t b1 = in();
+            char8_t b2 = in();
             auto fail = (store_ck<0xe0, 12, 4>(cp, b) || store_ck<0x80, 6, 6>(cp, b1) ||
                          store_ck<0x80, 0, 6>(cp, b2));
             if (!fail && (cp >= 0x800) && is_valid_cp(cp)) return cp;
         }
         else if (b <= 0xf7) // 0x10000-0x10ffff
         {
-            uint32_t cp = 0;
+            char32_t cp = 0;
             auto fail = (store_ck<0xf0, 18, 3>(cp, b) || store_ck<0x80, 12, 6>(cp, in()) ||
                          store_ck<0x80, 6, 6>(cp, in()) || store_ck<0x80, 0, 6>(cp, in()));
             if (!fail && (cp >= 0x10000) && (cp <= 0x10ffff)) return cp;
@@ -307,18 +309,18 @@ public:
     // Convert a UTF-32 codepoint into up to 4 UTF-8 code units and
     // write them to 'out'.
     template <class Out>
-    static int XLANG_FORCE_INLINE write(uint32_t cp, Out&& out)
+    static int XLANG_FORCE_INLINE write(char32_t cp, Out&& out)
     {
         return write_valid(if_valid(cp), out);
     }
 
     template <class Out>
-    static int XLANG_FORCE_INLINE write_valid(uint32_t cp, Out&& out)
+    static int XLANG_FORCE_INLINE write_valid(char32_t cp, Out&& out)
     {
         XLANG_ASSUME(is_valid_cp(cp));
         if (cp <= 0x7f)
         {
-            out(narrow_cast<uint8_t>(cp));
+            out(narrow_cast<char8_t>(cp));
             return 1;
         }
         else if (cp <= 0x7ff)
